@@ -56,11 +56,39 @@ class CampusFlowOrchestrator:
         context = state.get("context", {})
         booking_id = state.get("booking_id")
         
-        # If we already have structured request from direct form, use it
+        booking = self.db.query(Booking).filter(Booking.id == booking_id).first() if booking_id else None
         structured = state.get("structured_request")
+
         if not structured and raw_text:
             res = self.understanding_agent.process(raw_text, context)
             structured = res["data"]
+
+            # Merge ground-truth fields if already set in database booking record
+            if booking:
+                if booking.resource:
+                    structured["preferred_resource"] = booking.resource.name
+                if booking.date:
+                    structured["date"] = booking.date
+                if booking.start_time:
+                    structured["start_time"] = booking.start_time
+                if booking.end_time:
+                    structured["end_time"] = booking.end_time
+                if booking.participant_count:
+                    structured["participant_count"] = booking.participant_count
+                if booking.event_name and booking.event_name != "University Academic Event":
+                    structured["event_name"] = booking.event_name
+                if booking.event_type and booking.event_type != "department_seminar":
+                    structured["event_type"] = booking.event_type
+                if booking.requester and booking.requester.department:
+                    structured["department"] = booking.requester.department.name
+                structured["flexibility"] = {
+                    "time_flexible": booking.time_flexible,
+                    "max_shift_minutes": booking.max_shift_minutes,
+                    "alternative_dates": []
+                }
+                if booking.equipment_needed:
+                    structured["equipment"] = [eq.equipment_name for eq in booking.equipment_needed]
+
             self._log_decision(
                 booking_id=booking_id,
                 agent_name="Request Understanding Agent",
@@ -68,26 +96,24 @@ class CampusFlowOrchestrator:
                 output_data=structured,
                 reasoning=res["reasoning"]
             )
-        elif not structured:
-            # Fallback to database booking row
-            booking = self.db.query(Booking).filter(Booking.id == booking_id).first()
-            if booking:
-                structured = {
-                    "resource_type": booking.resource_type,
-                    "preferred_resource": booking.resource.name if booking.resource else None,
-                    "event_name": booking.event_name,
-                    "event_type": booking.event_type,
-                    "department": booking.requester.department.name if (booking.requester and booking.requester.department) else "General",
-                    "date": booking.date,
-                    "start_time": booking.start_time,
-                    "end_time": booking.end_time,
-                    "participant_count": booking.participant_count,
-                    "equipment": [eq.equipment_name for eq in booking.equipment_needed],
-                    "flexibility": {
-                        "time_flexible": booking.time_flexible,
-                        "max_shift_minutes": booking.max_shift_minutes
-                    }
+        elif not structured and booking:
+            structured = {
+                "resource_type": booking.resource_type,
+                "preferred_resource": booking.resource.name if booking.resource else booking.resource_type,
+                "event_name": booking.event_name,
+                "event_type": booking.event_type,
+                "department": booking.requester.department.name if (booking.requester and booking.requester.department) else "General",
+                "date": booking.date,
+                "start_time": booking.start_time,
+                "end_time": booking.end_time,
+                "participant_count": booking.participant_count,
+                "equipment": [eq.equipment_name for eq in booking.equipment_needed],
+                "flexibility": {
+                    "time_flexible": booking.time_flexible,
+                    "max_shift_minutes": booking.max_shift_minutes,
+                    "alternative_dates": []
                 }
+            }
 
         step = {
             "agent": "Request Understanding Agent",
@@ -164,7 +190,9 @@ class CampusFlowOrchestrator:
 
     def _check_conflict(self, state: BookingWorkflowState) -> str:
         """Conditional routing branch."""
-        if state.get("has_conflict", False):
+        pol_data = state.get("policy_result", {})
+        has_policy_violation = not pol_data.get("policy_compliant", True)
+        if state.get("has_conflict", False) or has_policy_violation:
             return "negotiation"
         return "optimization"
 
@@ -213,25 +241,29 @@ class CampusFlowOrchestrator:
         # If no negotiation occurred (no conflict), generate single direct plan
         if not plans:
             res_data = state["resource_data"]
-            plans = [{
-                "plan_id": "PLAN_DIRECT",
-                "title": "Direct Allocation",
-                "strategy": "DIRECT",
-                "description": "Standard direct allocation without conflicts.",
-                "allocations": [{
-                    "booking_id": booking_id,
-                    "event_name": req_data.get("event_name"),
-                    "resource_id": res_data.get("requested_resource_id"),
-                    "resource_name": res_data.get("requested_resource"),
-                    "date": req_data.get("date"),
-                    "start_time": req_data.get("start_time"),
-                    "end_time": req_data.get("end_time"),
-                    "is_rescheduled": False,
-                    "shift_minutes": 0
-                }],
-                "is_physically_valid": True,
-                "tradeoffs": {}
-            }]
+            policy_compliant = pol_data.get("policy_compliant", True) if pol_data else True
+            if policy_compliant:
+                plans = [{
+                    "plan_id": "PLAN_DIRECT",
+                    "title": "Direct Allocation",
+                    "strategy": "DIRECT",
+                    "description": "Standard direct allocation without conflicts.",
+                    "allocations": [{
+                        "booking_id": booking_id,
+                        "event_name": req_data.get("event_name"),
+                        "resource_id": res_data.get("requested_resource_id"),
+                        "resource_name": res_data.get("requested_resource"),
+                        "date": req_data.get("date"),
+                        "start_time": req_data.get("start_time"),
+                        "end_time": req_data.get("end_time"),
+                        "is_rescheduled": False,
+                        "shift_minutes": 0
+                    }],
+                    "is_physically_valid": True,
+                    "tradeoffs": {}
+                }]
+            else:
+                plans = []
 
         res = self.optimization_agent.process(
             candidate_plans=plans,

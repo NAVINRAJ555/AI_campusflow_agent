@@ -70,7 +70,10 @@ class PolicyPriorityAgent:
             # Rule: Capacity Check
             if rule_type == "CAPACITY_CHECK":
                 if not resource_analysis.get("capacity_ok", True):
-                    violations.append(f"Policy '{policy.name}': Participant count exceeds resource physical capacity.")
+                    cap = resource_analysis.get("requested_capacity", "limited")
+                    violations.append(
+                        f"Policy '{policy.name}': Participant count ({request_data.get('participant_count')}) exceeds resource physical capacity ({cap})."
+                    )
                 applied_rules.append(policy.name)
 
             # Rule: Operating Hours
@@ -86,9 +89,10 @@ class PolicyPriorityAgent:
                 req_res = resource_analysis.get("requested_resource", "").lower()
 
                 if any(r in req_res for r in restricted_resources) and allowed_depts:
-                    if not any(d in dept_name for d in allowed_depts):
+                    is_club = "club" in event_type or "club" in event_name
+                    if not any(d in dept_name for d in allowed_depts) or is_club:
                         violations.append(
-                            f"Policy '{policy.name}': Resource '{req_res}' is restricted to {allowed_depts}."
+                            f"Policy '{policy.name}': Resource '{req_res}' is restricted to CSE/IT academic coursework. Student club and unauthorized activities are prohibited."
                         )
                 applied_rules.append(policy.name)
 

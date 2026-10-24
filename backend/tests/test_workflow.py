@@ -51,4 +51,15 @@ def test_full_agent_workflow_orchestration():
         assert booking.status in [BookingStatus.APPROVED, BookingStatus.RESCHEDULED]
         assert booking.resource_id is not None
     finally:
+        if 'booking' in locals() and booking and booking.id:
+            from app.models.allocation import Allocation
+            from app.models.calendar_event import CalendarEvent
+            from app.models.decision_log import DecisionLog
+            from app.models.notification import Notification
+            db.query(Allocation).filter(Allocation.booking_id == booking.id).delete()
+            db.query(CalendarEvent).filter(CalendarEvent.booking_id == booking.id).delete()
+            db.query(DecisionLog).filter(DecisionLog.booking_id == booking.id).delete()
+            db.query(Notification).filter(Notification.booking_id == booking.id).delete()
+            db.delete(booking)
+            db.commit()
         db.close()

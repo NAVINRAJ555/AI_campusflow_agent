@@ -180,6 +180,7 @@ class ResourceIntelligenceAgent:
         result = ResourceAnalysisResult(
             requested_resource=target_resource.name,
             requested_resource_id=target_resource.id,
+            requested_capacity=target_resource.capacity,
             available=overall_available,
             capacity_ok=capacity_ok,
             operating_hours_ok=operating_hours_ok,

@@ -1,9 +1,11 @@
 import time
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from app.models.resource import Resource
 from app.models.booking import Booking
+from app.models.policy import Policy
 from app.models.enums import BookingStatus, ResourceStatus
 from app.agents.resource_intelligence.agent import time_to_minutes, intervals_overlap
 from app.agents.negotiation.schemas import (
@@ -36,7 +38,8 @@ class NegotiationAgent:
         start_time_clock = time.time()
         
         conflicts = resource_analysis.get("conflicts", [])
-        if not conflicts and resource_analysis.get("available", True):
+        policy_compliant = policy_result.get("policy_compliant", True)
+        if not conflicts and resource_analysis.get("available", True) and policy_compliant:
             # No conflict: single straightforward plan
             target_res_id = resource_analysis.get("requested_resource_id")
             target_res_name = resource_analysis.get("requested_resource", "Primary Resource")
@@ -99,7 +102,29 @@ class NegotiationAgent:
         # STRATEGY 1: Alternative Resource Candidate
         # -------------------------------------------------------------
         alternatives = resource_analysis.get("alternatives", [])
+
+        # Check active policies to avoid proposing restricted alternatives
+        active_policies = db.query(Policy).filter(Policy.active == True).all()
+        restricted_alt_names = set()
+        for p in active_policies:
+            if p.rule_type == "DEPARTMENT_RESTRICTION":
+                try:
+                    cfg = json.loads(p.rule_config) if isinstance(p.rule_config, str) else p.rule_config
+                    p_res = [r.lower() for r in cfg.get("resources", [])]
+                    p_depts = [d.lower() for d in cfg.get("allowed_departments", [])]
+                    req_dept = (request_data.get("department") or "").lower()
+                    ev_type = (request_data.get("event_type") or "").lower()
+                    ev_name = (request_data.get("event_name") or "").lower()
+                    is_club = "club" in ev_type or "club" in ev_name
+                    if not any(d in req_dept for d in p_depts) or is_club:
+                        restricted_alt_names.update(p_res)
+                except Exception:
+                    pass
+
         for alt in alternatives:
+            alt_name_lower = alt.get("name", "").lower()
+            if any(r in alt_name_lower for r in restricted_alt_names):
+                continue
             if alt.get("is_available_at_requested_time") and alt.get("capacity", 0) >= participants:
                 candidate_plans.append(CandidateNegotiationPlan(
                     plan_id=f"PLAN_{plan_counter}",
@@ -137,7 +162,8 @@ class NegotiationAgent:
         # -------------------------------------------------------------
         # STRATEGY 2: Time Shift within Flexibility Window
         # -------------------------------------------------------------
-        if time_flexible and max_shift > 0:
+        capacity_ok = resource_analysis.get("capacity_ok", True)
+        if time_flexible and max_shift > 0 and capacity_ok and policy_compliant:
             target_res = db.query(Resource).filter(Resource.id == target_res_id).first()
             if target_res:
                 op_start_min = time_to_minutes(target_res.operating_start)
@@ -258,50 +284,62 @@ class NegotiationAgent:
                 conf_booking_id = c.get("booking_id")
                 conf_booking = db.query(Booking).filter(Booking.id == conf_booking_id).first()
                 if conf_booking and alternatives:
-                    valid_alt = alternatives[0]
-                    candidate_plans.append(CandidateNegotiationPlan(
-                        plan_id=f"PLAN_{plan_counter}",
-                        title=f"Priority Preemption: Relocate '{c.get('event_name')}' to {valid_alt.get('name')}",
-                        description=(
-                            f"Allocate {target_res_name} to higher-priority '{event_name}' ({req_priority}). "
-                            f"Relocate conflicting '{c.get('event_name')}' ({conf_priority}) to {valid_alt.get('name')}."
-                        ),
-                        strategy="PREEMPTION_SWAP",
-                        allocations=[
-                            CandidateAllocationDetail(
-                                booking_id=booking_id,
-                                event_name=event_name,
-                                resource_id=target_res_id,
-                                resource_name=target_res_name,
-                                date=req_date,
-                                start_time=req_start,
-                                end_time=req_end,
-                                is_rescheduled=False,
-                                shift_minutes=0,
-                                tradeoff_notes=f"Higher priority event awarded primary resource."
+                    valid_alt = None
+                    for candidate_alt in alternatives:
+                        if candidate_alt.get("capacity", 0) >= conf_booking.participant_count and candidate_alt.get("is_available_at_requested_time"):
+                            cand_name_lower = candidate_alt.get("name", "").lower()
+                            conf_is_club = "club" in (conf_booking.event_type or "").lower() or "club" in (conf_booking.event_name or "").lower()
+                            if conf_is_club and any(r in cand_name_lower for r in restricted_alt_names):
+                                continue
+                            valid_alt = candidate_alt
+                            break
+                    if not valid_alt and alternatives:
+                        valid_alt = alternatives[0]
+
+                    if valid_alt:
+                        candidate_plans.append(CandidateNegotiationPlan(
+                            plan_id=f"PLAN_{plan_counter}",
+                            title=f"Priority Preemption: Relocate '{c.get('event_name')}' to {valid_alt.get('name')}",
+                            description=(
+                                f"Allocate {target_res_name} to higher-priority '{event_name}' ({req_priority}). "
+                                f"Relocate conflicting '{c.get('event_name')}' ({conf_priority}) to {valid_alt.get('name')}."
                             ),
-                            CandidateAllocationDetail(
-                                booking_id=conf_booking_id,
-                                event_name=c.get("event_name"),
-                                resource_id=valid_alt.get("resource_id"),
-                                resource_name=valid_alt.get("name"),
-                                date=req_date,
-                                start_time=conf_booking.start_time,
-                                end_time=conf_booking.end_time,
-                                is_rescheduled=True,
-                                shift_minutes=0,
-                                tradeoff_notes=f"Relocated to {valid_alt.get('name')} to accommodate higher priority event."
-                            )
-                        ],
-                        tradeoffs={
-                            "preemption_occurred": True,
-                            "relocated_event": c.get("event_name"),
-                            "relocated_to": valid_alt.get("name")
-                        },
-                        is_physically_valid=True
-                    ))
-                    plan_counter += 1
-                    break
+                            strategy="PREEMPTION_SWAP",
+                            allocations=[
+                                CandidateAllocationDetail(
+                                    booking_id=booking_id,
+                                    event_name=event_name,
+                                    resource_id=target_res_id,
+                                    resource_name=target_res_name,
+                                    date=req_date,
+                                    start_time=req_start,
+                                    end_time=req_end,
+                                    is_rescheduled=False,
+                                    shift_minutes=0,
+                                    tradeoff_notes=f"Higher priority event awarded primary resource."
+                                ),
+                                CandidateAllocationDetail(
+                                    booking_id=conf_booking_id,
+                                    event_name=c.get("event_name"),
+                                    resource_id=valid_alt.get("resource_id"),
+                                    resource_name=valid_alt.get("name"),
+                                    date=req_date,
+                                    start_time=conf_booking.start_time,
+                                    end_time=conf_booking.end_time,
+                                    is_rescheduled=True,
+                                    shift_minutes=0,
+                                    tradeoff_notes=f"Relocated to {valid_alt.get('name')} to accommodate higher priority event."
+                                )
+                            ],
+                            tradeoffs={
+                                "preemption_occurred": True,
+                                "relocated_event": c.get("event_name"),
+                                "relocated_to": valid_alt.get("name")
+                            },
+                            is_physically_valid=True
+                        ))
+                        plan_counter += 1
+                        break
 
         reasoning = (
             f"Detected {len(conflicts)} conflict(s). "

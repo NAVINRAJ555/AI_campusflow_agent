@@ -25,6 +25,7 @@ class AlternativeResourceCandidate(BaseModel):
 class ResourceAnalysisResult(BaseModel):
     requested_resource: str
     requested_resource_id: Optional[int] = None
+    requested_capacity: Optional[int] = None
     available: bool
     capacity_ok: bool
     operating_hours_ok: bool

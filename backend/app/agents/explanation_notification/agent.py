@@ -53,26 +53,46 @@ class ExplanationNotificationAgent:
 
         pref_res = request_data.get("preferred_resource") or request_data.get("resource_type")
         conflicts = resource_analysis.get("conflicts", [])
-        priority = policy_result.get("priority", "MEDIUM")
+        priority_raw = policy_result.get("priority", "MEDIUM")
+        priority = priority_raw.value if hasattr(priority_raw, "value") else str(priority_raw).replace("PriorityLevel.", "")
 
         if not allocations_data:
             # Rejection case
             booking.status = BookingStatus.REJECTED
             db.commit()
 
-            explanation_text = (
-                f"Your request for {pref_res} on {request_data.get('date')} from {request_data.get('start_time')} "
-                f"to {request_data.get('end_time')} could not be accommodated due to hard policy or capacity constraints."
-            )
+            violations = policy_result.get("policy_violations") or policy_result.get("violations") or []
+            if violations:
+                violation_str = " ".join(violations)
+                explanation_text = (
+                    f"Your request for {pref_res} on {request_data.get('date')} from {request_data.get('start_time')} "
+                    f"to {request_data.get('end_time')} could not be accommodated due to institutional policy restrictions: {violation_str}"
+                )
+                final_reason = f"Rejected due to policy violation: {violation_str}"
+            elif not resource_analysis.get("capacity_ok", True):
+                cap = resource_analysis.get("requested_capacity", "limited")
+                explanation_text = (
+                    f"Your request for {pref_res} on {request_data.get('date')} from {request_data.get('start_time')} "
+                    f"to {request_data.get('end_time')} could not be accommodated: Participant count ({request_data.get('participant_count')}) "
+                    f"exceeds venue physical capacity ({cap}), and no capable alternative venue is available."
+                )
+                final_reason = f"Rejected: Participant count exceeds physical capacity ({cap})."
+            else:
+                explanation_text = (
+                    f"Your request for {pref_res} on {request_data.get('date')} from {request_data.get('start_time')} "
+                    f"to {request_data.get('end_time')} could not be accommodated due to hard policy or capacity constraints."
+                )
+                final_reason = "No feasible allocation satisfied all physical and policy constraints."
+
             factors = StructuredDecisionFactors(
                 decision="REJECTED",
                 priority_factor=f"Priority {priority} was insufficient to override existing schedule commitments.",
-                capacity_factor="No available resource met the capacity requirement.",
+                capacity_factor=f"Venue capacity constraint not met." if not resource_analysis.get("capacity_ok", True) else "No available resource met the capacity requirement.",
                 time_factor="No feasible time slot found within flexibility bounds.",
                 equipment_factor="Equipment constraints could not be satisfied.",
-                conflict_factor=f"Active conflict with {len(conflicts)} booked event(s).",
+                conflict_factor=f"Active conflict with {len(conflicts)} booked event(s)." if conflicts else "No direct schedule conflict.",
                 fairness_factor="Preserved overall schedule integrity.",
-                final_reason="No feasible allocation satisfied all physical and policy constraints."
+                final_reason=final_reason
             )
 
             # Notification
@@ -117,14 +137,44 @@ class ExplanationNotificationAgent:
             decision_type = "APPROVED"
 
         # Generate human-readable explanation
-        if conflicts and alloc_res_name != pref_res:
-            conf_names = ", ".join([c.get("event_name", "Existing event") for c in conflicts])
+        violations = policy_result.get("policy_violations") or policy_result.get("violations") or []
+        if violations:
+            violation_str = " ".join(violations)
+            if alloc_res_name != pref_res:
+                explanation_text = (
+                    f"Institutional Policy Notice: {violation_str} "
+                    f"CampusFlow auto-redirected your reservation to {alloc_res_name} to maintain university policy compliance."
+                )
+            else:
+                explanation_text = f"Institutional Policy Warning: {violation_str}"
+        elif strategy == "PREEMPTION_SWAP":
+            preempted_names = ", ".join([a.get("event_name", "conflicting event") for a in allocations_data if a.get("booking_id") != booking_id])
             explanation_text = (
-                f"Your request for {pref_res} from {request_data.get('start_time')} to {request_data.get('end_time')} "
-                f"could not be allocated because a conflicting event ('{conf_names}') occupies the resource. "
-                f"{alloc_res_name} has been allocated because it satisfies the required capacity of "
-                f"{request_data.get('participant_count')} participants and requested equipment requirements."
+                f"Your booking request for {alloc_res_name} on {request_data.get('date')} from {alloc_start} to {alloc_end} "
+                f"was awarded based on {priority} institutional priority. Conflicting lower-priority activity "
+                f"('{preempted_names}') has been successfully relocated to alternative facilities."
             )
+        elif alloc_res_name != pref_res:
+            if not resource_analysis.get("capacity_ok", True):
+                cap = resource_analysis.get("requested_capacity", "limited")
+                explanation_text = (
+                    f"Capacity Notice: Requested venue '{pref_res}' has a physical capacity of {cap}, "
+                    f"which cannot accommodate {request_data.get('participant_count')} attendees. "
+                    f"CampusFlow auto-allocated '{alloc_res_name}' to satisfy your physical capacity requirements."
+                )
+            elif conflicts:
+                conf_names = ", ".join([c.get("event_name", "Existing event") for c in conflicts])
+                explanation_text = (
+                    f"Your request for {pref_res} from {request_data.get('start_time')} to {request_data.get('end_time')} "
+                    f"could not be allocated because a conflicting event ('{conf_names}') occupies the resource. "
+                    f"{alloc_res_name} has been allocated because it satisfies the required capacity of "
+                    f"{request_data.get('participant_count')} participants and requested equipment requirements."
+                )
+            else:
+                explanation_text = (
+                    f"Your request was reallocated from '{pref_res}' to '{alloc_res_name}' "
+                    f"to optimize campus resource utilization and satisfy all event constraints."
+                )
         elif conflicts and is_rescheduled:
             explanation_text = (
                 f"Your request for {pref_res} was adjusted to {alloc_start}–{alloc_end} to avoid an existing booking "
@@ -136,10 +186,15 @@ class ExplanationNotificationAgent:
                 f"{alloc_end} has been successfully approved with all requested facilities."
             )
 
+        if not resource_analysis.get("capacity_ok", True):
+            cap_factor = f"Requested venue '{pref_res}' (cap {resource_analysis.get('requested_capacity')}) exceeded; allocated '{alloc_res_name}' to support {request_data.get('participant_count')} participants."
+        else:
+            cap_factor = f"Allocated venue '{alloc_res_name}' comfortably supports {request_data.get('participant_count')} participants."
+
         factors = StructuredDecisionFactors(
             decision=decision_type,
-            priority_factor=f"Assigned {priority} priority based on {request_data.get('event_type')} institutional classification.",
-            capacity_factor=f"Allocated venue '{alloc_res_name}' comfortably supports {request_data.get('participant_count')} participants.",
+            priority_factor=f"Assigned {priority} priority. {'; '.join(violations) if violations else 'Institutional policy verified.'}",
+            capacity_factor=cap_factor,
             time_factor=f"Scheduled slot: {alloc_start}–{alloc_end} (Flexibility utilized: {is_rescheduled}).",
             equipment_factor=f"Provided equipment: {', '.join(request_data.get('equipment', ['Standard A/V']))}.",
             conflict_factor=f"Successfully resolved {len(conflicts)} conflict(s) via multi-agent negotiation.",
@@ -187,11 +242,23 @@ class ExplanationNotificationAgent:
                 if other_b:
                     other_b.resource_id = alt_alloc.get("resource_id")
                     other_b.status = BookingStatus.RESCHEDULED
+                    
+                    # Synchronize Allocation record for preempted booking
+                    other_alloc = db.query(Allocation).filter(Allocation.booking_id == other_b.id).first()
+                    if other_alloc:
+                        other_alloc.resource_id = alt_alloc.get("resource_id")
+                        other_alloc.status = "RESCHEDULED"
+                    
+                    # Synchronize CalendarEvent record for preempted booking
+                    other_cal = db.query(CalendarEvent).filter(CalendarEvent.booking_id == other_b.id).first()
+                    if other_cal:
+                        other_cal.resource_id = alt_alloc.get("resource_id")
+
                     # Add notification for affected user
                     db.add(Notification(
                         user_id=other_b.requester_id,
                         booking_id=other_b.id,
-                        message=f"Notice: Your booking for '{other_b.event_name}' was relocated to {alt_alloc.get('resource_name')} to accommodate institutional scheduling.",
+                        message=f"Notice: Your booking for '{other_b.event_name}' was relocated to {alt_alloc.get('resource_name')} to accommodate higher-priority institutional scheduling.",
                         type="RESCHEDULED",
                         is_read=False
                     ))

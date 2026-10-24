@@ -17,7 +17,8 @@ import {
   ArrowLeft,
   Settings2,
   AlertTriangle,
-  Sparkles
+  Sparkles,
+  GitPullRequest
 } from 'lucide-react';
 
 export const BookingDetails: React.FC = () => {
@@ -29,6 +30,7 @@ export const BookingDetails: React.FC = () => {
   const [trace, setTrace] = useState<AgentTraceResponse | null>(null);
   const [resources, setResources] = useState<Resource[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Admin Override Form State
   const [showOverrideModal, setShowOverrideModal] = useState(false);
@@ -43,6 +45,7 @@ export const BookingDetails: React.FC = () => {
 
   const fetchData = async () => {
     setLoading(true);
+    setErrorMsg(null);
     try {
       const [bkRes, trRes, resList] = await Promise.all([
         bookingsApi.getById(bookingId),
@@ -57,8 +60,10 @@ export const BookingDetails: React.FC = () => {
       setOverrideDate(bkRes.data.date);
       setOverrideStartTime(bkRes.data.start_time);
       setOverrideEndTime(bkRes.data.end_time);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load booking details:', err);
+      const detail = err.response?.data?.detail || 'Booking not found or not authorized to view.';
+      setErrorMsg(detail);
     } finally {
       setLoading(false);
     }
@@ -76,15 +81,15 @@ export const BookingDetails: React.FC = () => {
     }
     setOverrideSubmitting(true);
     try {
-      await bookingsApi.override(bookingId, {
+      await bookingsApi.adminOverride(bookingId, {
         resource_id: overrideResourceId,
         date: overrideDate,
         start_time: overrideStartTime,
         end_time: overrideEndTime,
-        reason: overrideReason
+        override_reason: overrideReason.trim()
       });
+      alert('Administrative override successfully applied.');
       setShowOverrideModal(false);
-      setOverrideReason('');
       fetchData();
     } catch (err: any) {
       alert(err.response?.data?.detail || 'Override failed');
@@ -93,10 +98,33 @@ export const BookingDetails: React.FC = () => {
     }
   };
 
-  if (loading || !booking) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  if (errorMsg || !booking) {
+    return (
+      <div className="max-w-xl mx-auto mt-12 p-8 bg-white border border-slate-200 rounded-2xl shadow-sm text-center space-y-4">
+        <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto">
+          <AlertCircle className="w-6 h-6" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-800">Booking Notice</h2>
+        <p className="text-sm text-slate-600">{errorMsg || 'Booking not found.'}</p>
+        <p className="text-xs text-slate-500">
+          Tip: If you are logged in as a <strong>Student</strong>, you can only view bookings created by your account.
+        </p>
+        <div className="pt-2 flex justify-center space-x-3">
+          <Link to="/create-booking" className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition">
+            Create Booking
+          </Link>
+          <Link to="/my-bookings" className="px-4 py-2 bg-slate-100 text-slate-700 text-sm font-semibold rounded-lg hover:bg-slate-200 transition">
+            View My Bookings
+          </Link>
+        </div>
       </div>
     );
   }
@@ -142,7 +170,14 @@ export const BookingDetails: React.FC = () => {
           </div>
 
           <div className="flex items-center space-x-2">
-            <span className="text-xs bg-slate-100 px-3 py-1 rounded-md text-slate-600 font-mono">
+            <Link
+              to={`/negotiations/${booking.id}`}
+              className="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 font-semibold px-3 py-1.5 rounded-lg border border-blue-200 flex items-center space-x-1.5 transition"
+            >
+              <GitPullRequest className="w-3.5 h-3.5 text-blue-600" />
+              <span>View Conflict & Negotiation</span>
+            </Link>
+            <span className="text-xs bg-slate-100 px-3 py-1.5 rounded-lg text-slate-600 font-mono">
               Booking #{booking.id}
             </span>
           </div>

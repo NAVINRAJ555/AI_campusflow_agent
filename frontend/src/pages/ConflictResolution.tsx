@@ -24,10 +24,12 @@ export const ConflictResolution: React.FC = () => {
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
+      setErrorMsg(null);
       try {
         const [bkRes, negRes] = await Promise.all([
           bookingsApi.getById(idNum),
@@ -35,8 +37,10 @@ export const ConflictResolution: React.FC = () => {
         ]);
         setBooking(bkRes.data);
         setNegotiationData(negRes.data);
-      } catch (err) {
+      } catch (err: any) {
         console.error(err);
+        const detail = err.response?.data?.detail || 'Booking not found or you are not authorized to view it.';
+        setErrorMsg(detail);
       } finally {
         setLoading(false);
       }
@@ -57,10 +61,41 @@ export const ConflictResolution: React.FC = () => {
     }
   };
 
-  if (loading || !booking) {
+  if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      </div>
+    );
+  }
+
+  if (errorMsg || !booking) {
+    return (
+      <div className="max-w-xl mx-auto mt-12 p-8 bg-white border border-slate-200 rounded-2xl shadow-sm text-center space-y-4">
+        <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto">
+          <AlertTriangle className="w-6 h-6" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-800">Booking Notice</h2>
+        <p className="text-sm text-slate-600">
+          {errorMsg || 'Booking not found.'}
+        </p>
+        <p className="text-xs text-slate-500">
+          Tip: If you are logged in as a <strong>Student</strong>, booking #1 belongs to the Admin (Placement Drive). To see your own conflict resolution, create a booking request in the <strong>Create Booking</strong> tab.
+        </p>
+        <div className="pt-2 flex justify-center space-x-3">
+          <Link
+            to="/create-booking"
+            className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition"
+          >
+            Go to Create Booking
+          </Link>
+          <Link
+            to="/my-bookings"
+            className="px-4 py-2 bg-slate-100 text-slate-700 text-sm font-semibold rounded-lg hover:bg-slate-200 transition"
+          >
+            View My Bookings
+          </Link>
+        </div>
       </div>
     );
   }

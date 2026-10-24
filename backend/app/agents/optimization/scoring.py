@@ -16,11 +16,12 @@ def calculate_plan_score(
     req_end = request_data.get("end_time")
     req_equip = [e.lower() for e in request_data.get("equipment", [])]
     participants = request_data.get("participant_count", 1)
-    priority = policy_data.get("priority", "MEDIUM")
+    priority_raw = policy_data.get("priority", "MEDIUM")
+    priority_str = priority_raw.value if hasattr(priority_raw, "value") else str(priority_raw).replace("PriorityLevel.", "")
 
     # 1. Priority factor (0.0 - 1.0)
     priority_map = {"VERY_HIGH": 1.0, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.25}
-    priority_factor = priority_map.get(str(priority), 0.5)
+    priority_factor = priority_map.get(priority_str, 0.5)
 
     # Inspect allocations in candidate plan
     allocations = plan.get("allocations", [])
@@ -59,7 +60,12 @@ def calculate_plan_score(
     conflict_penalty = 1.0 if not plan.get("is_physically_valid", True) else 0.0
     rescheduling_penalty = 0.0
     if plan.get("strategy") == "PREEMPTION_SWAP":
-        rescheduling_penalty = 0.5
+        if priority_str == "VERY_HIGH":
+            rescheduling_penalty = 0.0
+        elif priority_str == "HIGH":
+            rescheduling_penalty = 0.1
+        else:
+            rescheduling_penalty = 0.5
     elif primary_alloc.get("is_rescheduled"):
         rescheduling_penalty = 0.25
 
